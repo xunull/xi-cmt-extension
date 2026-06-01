@@ -1,0 +1,150 @@
+{
+  "name": "xi-cmt",
+  "displayName": "xi-cmt — 中文源码注释阅读副本",
+  "description": "一键打开当前文件的带详细中文注释副本，并排阅读。OpenAI 兼容协议，支持 OpenAI / DeepSeek / Moonshot / SiliconFlow / Ollama。",
+  "version": "0.1.0",
+  "publisher": "xunull",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xunull/xi-cmt-extension.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=18"
+  },
+  "categories": [
+    "Education",
+    "Other"
+  ],
+  "keywords": [
+    "chinese",
+    "中文",
+    "annotation",
+    "comment",
+    "llm",
+    "deepseek",
+    "openai",
+    "ollama",
+    "moonshot",
+    "siliconflow"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onCommand:xi-cmt.openPreview",
+    "onCommand:xi-cmt.regenerate",
+    "onCommand:xi-cmt.setApiKey",
+    "onCommand:xi-cmt.clearCache"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "xi-cmt.openPreview",
+        "title": "xi-cmt: Open Annotated Preview",
+        "category": "xi-cmt",
+        "icon": "$(book)"
+      },
+      {
+        "command": "xi-cmt.regenerate",
+        "title": "xi-cmt: Regenerate Annotation",
+        "category": "xi-cmt",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "xi-cmt.setApiKey",
+        "title": "xi-cmt: Set API Key",
+        "category": "xi-cmt"
+      },
+      {
+        "command": "xi-cmt.clearCache",
+        "title": "xi-cmt: Clear Cache",
+        "category": "xi-cmt"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "xi-cmt.openPreview",
+          "group": "navigation",
+          "when": "!isInDiffEditor && resourceScheme != xi-cmt"
+        },
+        {
+          "command": "xi-cmt.regenerate",
+          "group": "navigation",
+          "when": "resourceScheme == xi-cmt"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "xi-cmt.openPreview"
+        },
+        {
+          "command": "xi-cmt.regenerate"
+        },
+        {
+          "command": "xi-cmt.setApiKey"
+        },
+        {
+          "command": "xi-cmt.clearCache"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "xi-cmt",
+      "properties": {
+        "xi-cmt.baseURL": {
+          "type": "string",
+          "default": "https://api.deepseek.com/v1",
+          "description": "OpenAI 兼容 /v1/chat/completions 的根路径。示例: https://api.deepseek.com/v1 | https://api.moonshot.cn/v1 | http://localhost:11434/v1"
+        },
+        "xi-cmt.model": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "description": "模型名。示例: deepseek-chat | moonshot-v1-32k | qwen2.5-coder:7b"
+        },
+        "xi-cmt.commentLanguage": {
+          "type": "string",
+          "default": "zh-CN",
+          "enum": ["zh-CN", "en-US"],
+          "description": "注释语言。MVP 仅测试 zh-CN。"
+        },
+        "xi-cmt.cacheMode": {
+          "type": "string",
+          "default": "project",
+          "enum": ["project", "user"],
+          "enumDescriptions": [
+            "缓存放在工作区 .vscode/.cmt-cache/，跟项目走",
+            "缓存放在 ~/.cache/xi-cmt/，跨项目共享"
+          ],
+          "description": "缓存位置策略。"
+        },
+        "xi-cmt.maxLines": {
+          "type": "number",
+          "default": 1500,
+          "description": "单文件最大行数。超出此值不调 LLM。"
+        },
+        "xi-cmt.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "description": "LLM 请求超时（毫秒）。Ollama 大模型 / DeepSeek thinking 建议抬到 180000。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "compile:scripts": "tsc -p scripts/tsconfig.json",
+    "test:llm": "npm run compile:scripts && node out-scripts/scripts/test-llm.js",
+    "test:stream": "npm run compile:scripts && node out-scripts/scripts/test-stream.js",
+    "replay": "npm run compile:scripts && node out-scripts/scripts/replay.js",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.4.0"
+  }
+}

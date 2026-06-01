@@ -1,3 +1,12 @@
+# xi-cmt
+out/
+out-scripts/
+*.vsix
+.vscode/.cmt-cache/
+fixtures/*.llm-output.*.txt
+fixtures/*.rendered.*.txt
+fixtures/*.stream-rendered.*.txt
+
 # Logs
 logs
 *.log
