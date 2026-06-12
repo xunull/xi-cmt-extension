@@ -25,6 +25,31 @@ code --install-extension xi-cmt-*.vsix
 
 或在 VS Code 里：扩展面板 → `...` → `Install from VSIX...` → 选 `.vsix`。
 
+## 本地构建 / 参与开发
+
+**前置要求**：Node.js ≥ 18、npm
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/xunull/xi-cmt-extension.git
+cd xi-cmt-extension
+
+# 2. 安装依赖（含 @vscode/vsce 打包工具）
+npm install
+
+# 3. 编译 TypeScript → out/
+npm run compile
+
+# 4. 打包成 .vsix（会自动先执行 vscode:prepublish 即重新编译）
+npm run package
+# 产物：xi-cmt-<version>.vsix
+
+# 5. 安装到本地 VS Code
+code --install-extension xi-cmt-*.vsix
+```
+
+**开发调试**：用 VS Code 打开仓库，按 `F5` 启动扩展开发宿主（Extension Development Host），实时调试无需打包。
+
 ## 快速开始
 
 1. 命令面板（`Cmd+Shift+P` / `Ctrl+Shift+P`）→ `xi-cmt: Set API Key` → 粘贴你的 DeepSeek API Key（[免费注册 deepseek.com](https://platform.deepseek.com)，新用户送额度，单文件大概 ¥0.01）

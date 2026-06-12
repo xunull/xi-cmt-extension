@@ -31,6 +31,7 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
+    "onStartupFinished",
     "onCommand:xi-cmt.openPreview",
     "onCommand:xi-cmt.regenerate",
     "onCommand:xi-cmt.setApiKey",
@@ -42,7 +43,10 @@
         "command": "xi-cmt.openPreview",
         "title": "xi-cmt: Open Annotated Preview",
         "category": "xi-cmt",
-        "icon": "$(book)"
+        "icon": {
+          "light": "resources/icon-light.svg",
+          "dark": "resources/icon-dark.svg"
+        }
       },
       {
         "command": "xi-cmt.regenerate",
@@ -66,12 +70,12 @@
         {
           "command": "xi-cmt.openPreview",
           "group": "navigation",
-          "when": "!isInDiffEditor && resourceScheme != xi-cmt"
+          "when": "resourceScheme != 'xi-cmt'"
         },
         {
           "command": "xi-cmt.regenerate",
           "group": "navigation",
-          "when": "resourceScheme == xi-cmt"
+          "when": "resourceScheme == 'xi-cmt'"
         }
       ],
       "commandPalette": [
@@ -105,18 +109,29 @@
         "xi-cmt.commentLanguage": {
           "type": "string",
           "default": "zh-CN",
-          "enum": ["zh-CN", "en-US"],
+          "enum": [
+            "zh-CN",
+            "en-US"
+          ],
           "description": "注释语言。MVP 仅测试 zh-CN。"
         },
-        "xi-cmt.cacheMode": {
+        "xi-cmt.promptPreset": {
           "type": "string",
-          "default": "project",
-          "enum": ["project", "user"],
+          "default": "expert",
+          "enum": ["beginner", "expert", "architect", "custom"],
           "enumDescriptions": [
-            "缓存放在工作区 .vscode/.cmt-cache/，跟项目走",
-            "缓存放在 ~/.cache/xi-cmt/，跨项目共享"
+            "初学者：What + Why + How 全覆盖，解释语言特性和设计模式，适合正在学习该语言的读者",
+            "资深开发者：聚焦 Why + 架构决策，跳过显然语法，读者熟悉该语言（默认）",
+            "架构师：设计决策 / 系统边界 / 性能取舍 / 技术债信号，评估代码质量用",
+            "自定义：使用 xi-cmt.customPrompt 中的 system prompt（L<n>: 锚点约束由插件自动注入）"
           ],
-          "description": "缓存位置策略。"
+          "description": "注释风格预设。切换预设后，已打开的注释视图需手动运行「xi-cmt: Regenerate」刷新。"
+        },
+        "xi-cmt.customPrompt": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "promptPreset=custom 时生效的自定义 system prompt。L<n>: 锚点格式由插件自动保证，无需在此声明。留空时退回 expert 预设。"
         },
         "xi-cmt.maxLines": {
           "type": "number",
@@ -135,6 +150,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "compile:scripts": "tsc -p scripts/tsconfig.json",
+    "test": "tsc -p test/tsconfig.json && node --test out-test/test/*.test.js",
     "test:llm": "npm run compile:scripts && node out-scripts/scripts/test-llm.js",
     "test:stream": "npm run compile:scripts && node out-scripts/scripts/test-stream.js",
     "replay": "npm run compile:scripts && node out-scripts/scripts/replay.js",
@@ -144,7 +160,7 @@
   "devDependencies": {
     "@types/node": "^18.19.0",
     "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^3.0.0",
+    "@vscode/vsce": "^3.9.2",
     "typescript": "^5.4.0"
   }
 }

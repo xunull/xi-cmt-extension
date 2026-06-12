@@ -159,12 +159,25 @@ export function validate(
   return { anchorsExpected: expected, anchorsHit: hit, mismatches, hitRate, mismatchRate };
 }
 
+export interface RenderWithLinemapResult {
+  content: string;
+  /**
+   * [annotatedLine0, originalLine0] 对，均 0-based。
+   * annotatedLine0：注释文本中代码行的位置（注释行会将代码行往后推）。
+   * originalLine0：对应 originalSource 中的行（= lineNo - 1）。
+   */
+  pairs: [number, number][];
+}
+
 /**
- * 把 parsed 结构渲染成最终展示给用户的文本。
- * 顺序按 lineNo 升序——LLM 偶尔会乱序输出锚点，但用户视图必须按行号升序，否则跟左侧原文走读对不上。
- * 缺失的 lineNo：用原文补齐（让显示尽量像原文 + 注释，而不是断片）。
+ * 把 parsed 结构渲染成最终展示给用户的文本，同时记录行号映射。
+ * pairs 用于构建 linemap sidecar（同步滚动 + 打开时对齐视口）。
  */
-export function render(parsed: AnchoredLine[], originalSource: string, trailingComments: string[] = []): string {
+export function renderWithLinemap(
+  parsed: AnchoredLine[],
+  originalSource: string,
+  trailingComments: string[] = []
+): RenderWithLinemapResult {
   const originalLines = splitSourceLines(originalSource);
   const byLineNo = new Map<number, AnchoredLine>();
   for (const p of parsed) {
@@ -172,30 +185,40 @@ export function render(parsed: AnchoredLine[], originalSource: string, trailingC
   }
 
   const out: string[] = [];
+  const pairs: [number, number][] = [];
+
   for (let i = 1; i <= originalLines.length; i++) {
     const entry = byLineNo.get(i);
     if (entry) {
       for (const c of entry.leadingComments) out.push(c);
-      // 优先用原文行内容（防止 LLM 偷偷改了空白/缩进），不用 entry.code
-      // 已经在 validate 里确认 trim 等价
-      out.push(originalLines[i - 1]);
-    } else {
-      // 缺失锚点：直接补原文
-      out.push(originalLines[i - 1]);
     }
+    const annotatedLine0 = out.length;
+    out.push(originalLines[i - 1]);
+    pairs.push([annotatedLine0, i - 1]);
   }
+
   if (trailingComments.length > 0) {
-    // 尾部的 LLM 多余注释保留在末尾，避免悄悄丢失信息
     out.push(...trailingComments);
   }
-  return out.join('\n');
+
+  return { content: out.join('\n'), pairs };
+}
+
+/**
+ * 把 parsed 结构渲染成最终展示给用户的文本。
+ * 顺序按 lineNo 升序——LLM 偶尔会乱序输出锚点，但用户视图必须按行号升序，否则跟左侧原文走读对不上。
+ * 缺失的 lineNo：用原文补齐（让显示尽量像原文 + 注释，而不是断片）。
+ */
+export function render(parsed: AnchoredLine[], originalSource: string, trailingComments: string[] = []): string {
+  return renderWithLinemap(parsed, originalSource, trailingComments).content;
 }
 
 /**
  * source.split('\n') 末尾若是空字符串（trailing newline），把它去掉。
  * 这样「100 行带末尾换行」与「100 行不带末尾换行」算出来都是 100 行，软校验阈值不被误判。
+ * 导出供 contentProvider 复用（chunker 输入需要同样的行分割语义）。
  */
-function splitSourceLines(source: string): string[] {
+export function splitSourceLines(source: string): string[] {
   const lines = source.split('\n');
   if (lines.length > 0 && lines[lines.length - 1] === '') {
     return lines.slice(0, -1);

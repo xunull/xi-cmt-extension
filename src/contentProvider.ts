@@ -1,17 +1,28 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as path from 'path';
-import { streamAnnotate, LlmError, LlmSettings } from './llm';
-import { PROMPT_VERSION } from './prompt';
-import { parse, validate, render, ConsistencyError } from './parser';
+import { streamAnnotate, streamAnnotateChunk, LlmError, LlmSettings, PromptPreset } from './llm';
+import { PROMPT_VERSION, buildSystemPrompt } from './prompt';
+import { parse, validate, renderWithLinemap, ConsistencyError, splitSourceLines } from './parser';
 import {
-  CacheMode,
   computeCacheKey,
+  computeChunkCacheKey,
+  computePromptHash,
   extractUriMeta,
   readCache,
   resolveCachePath,
+  resolveLinemapPath,
   writeCacheAtomic,
 } from './cache';
+import {
+  Linemap,
+  LinemapSidecar,
+  buildLinemapSidecar,
+  readLinemapSidecar,
+  writeLinemapSidecar,
+} from './linemap';
+import { splitBySemanticBoundary } from './chunker';
+import { assembleChunks, AnnotatedChunk } from './assemble';
 import { Semaphore } from './semaphore';
 
 export const CMT_SCHEME = 'xi-cmt';
@@ -19,8 +30,6 @@ export const CMT_SCHEME = 'xi-cmt';
 /**
  * URI 规范（design doc 锁定）：
  *   xi-cmt:/<workspace-relative-path-or-absolute>?hash=<sha>&model=<id>&pv=<promptVersion>
- *
- * model + promptVersion 进 URI → 换 model / bump prompt 产生新 cmtUri、新 cacheKey、新缓存条目。
  */
 export function buildCmtUri(originalUri: vscode.Uri, content: string, model: string): vscode.Uri {
   const hash = crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
@@ -41,28 +50,21 @@ function addCmtSuffix(rel: string): string {
   return `${base}.cmt${ext}`;
 }
 
-/**
- * 一次预览的流式状态机。
- *
- * 生命周期：
- *   1. 首次 provideTextDocumentContent → startStream
- *      a. 算 cachePath，readCache → 命中 → state.done=true, renderedFinal=cached（秒开）
- *      b. 未命中 → 启动 runStream（semaphore 限流，过 2 并发会排队）
- *   2. runStream 收到 chunk → 累积 buffer + 节流 200ms fire onDidChange
- *      VS Code 重新 provide → 返回 buffer 的中间渲染
- *   3. runStream 流完 → parse + validate + render → renderedFinal → 原子写缓存
- *   4. 之后所有对该 cmtUri 的 provide 都命中内存（streams Map），不再触发 LLM
- *
- * 同 cmtUri 并发 provide：streams Map 一旦有 state，后续直接复用，不会启动第二次流。
- */
 interface StreamState {
   source: string;
   cachePath: string;
+  linemapPath: string;
+  originalUri: vscode.Uri;
+  promptHash: string;
+  /** 单块模式：LLM 原始流缓冲。多块模式：unused（用 totalChunks 区分） */
   buffer: string;
   done: boolean;
   error?: unknown;
   renderedFinal?: string;
   lastFire: number;
+  /** 多块模式下有值 */
+  totalChunks?: number;
+  completedChunks?: number;
 }
 
 const FIRE_THROTTLE_MS = 200;
@@ -73,30 +75,71 @@ export interface ErrorEvent {
   error: unknown;
 }
 
+export interface StatusEvent {
+  completedChunks: number;
+  totalChunks: number;
+  done: boolean;
+}
+
 export class CmtContentProvider implements vscode.TextDocumentContentProvider {
   private readonly _onDidChange = new vscode.EventEmitter<vscode.Uri>();
   readonly onDidChange = this._onDidChange.event;
 
-  /** runStream catch 异常时 fire——让 extension 弹窗 + 提供按钮 */
   private readonly _onError = new vscode.EventEmitter<ErrorEvent>();
   readonly onError = this._onError.event;
+
+  private readonly _onStatus = new vscode.EventEmitter<StatusEvent>();
+  readonly onStatus = this._onStatus.event;
 
   private readonly streams = new Map<string, StreamState>();
   private readonly semaphore = new Semaphore(MAX_CONCURRENT_LLM);
 
+  /** 原始文件 URI → CMT URI（字符串），供 scroll sync 双向查找 */
+  private readonly _originalToCmt = new Map<string, string>();
+  private readonly _cmtToOriginal = new Map<string, string>();
+
+  private readonly _linemaps = new Map<string, Linemap>();
+  private readonly _linemapCallbacks = new Map<string, Array<(lm: Linemap) => void>>();
+
   constructor(private readonly context: vscode.ExtensionContext) {}
 
-  /** 主动失效某个 cmtUri 的内存状态，让下次 provide 重新走 cache 检查 → LLM */
   invalidate(uri: vscode.Uri): void {
     this.streams.delete(uri.toString());
     this._onDidChange.fire(uri);
   }
 
-  /** 清掉所有内存状态（xi-cmt.clearCache 命令调用）。不删磁盘缓存——磁盘清理由 cache.clearAllCaches 负责。 */
   invalidateAll(): void {
     const uris = Array.from(this.streams.keys()).map((k) => vscode.Uri.parse(k));
     this.streams.clear();
     for (const u of uris) this._onDidChange.fire(u);
+  }
+
+  getLinemap(cmtUri: vscode.Uri): Linemap | undefined {
+    return this._linemaps.get(cmtUri.toString());
+  }
+
+  getCmtUriStringForOriginal(originalUri: vscode.Uri): string | undefined {
+    return this._originalToCmt.get(originalUri.toString());
+  }
+
+  getOriginalUriStringForCmt(cmtUri: vscode.Uri): string | undefined {
+    return this._cmtToOriginal.get(cmtUri.toString());
+  }
+
+  /** 注册一次性回调，在 linemap 就绪时触发（缓存命中时也会触发） */
+  onLinemapReadyOnce(cmtUri: vscode.Uri, cb: (lm: Linemap) => void): void {
+    const key = cmtUri.toString();
+    const existing = this._linemapCallbacks.get(key) ?? [];
+    existing.push(cb);
+    this._linemapCallbacks.set(key, existing);
+  }
+
+  private setLinemap(cmtUri: vscode.Uri, linemap: Linemap): void {
+    const key = cmtUri.toString();
+    this._linemaps.set(key, linemap);
+    const cbs = this._linemapCallbacks.get(key) ?? [];
+    this._linemapCallbacks.delete(key);
+    for (const cb of cbs) cb(linemap);
   }
 
   async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
@@ -113,56 +156,62 @@ export class CmtContentProvider implements vscode.TextDocumentContentProvider {
       if (state.error !== undefined) return renderError(state.error, state.source);
       return state.renderedFinal ?? state.source;
     }
+    if (state.totalChunks !== undefined) {
+      return renderChunking(state.completedChunks ?? 0, state.totalChunks);
+    }
     return renderInProgress(state.buffer, state.source);
   }
 
-  /**
-   * 启动一次新流（或命中缓存直接返回）。
-   * 返回 StreamState（成功，已记录到 streams Map）或 string（启动前错误）
-   */
   private async startStream(uri: vscode.Uri): Promise<StreamState | string> {
     const originalUri = recoverOriginalUri(uri);
     if (!originalUri) {
       return `// xi-cmt: 无法从 ${uri.toString()} 反推原文件路径。`;
     }
+
     let doc: vscode.TextDocument;
     try {
       doc = await vscode.workspace.openTextDocument(originalUri);
     } catch (err) {
       return `// xi-cmt: 读取原文件失败：${err instanceof Error ? err.message : String(err)}`;
     }
+
     const source = doc.getText();
     const cfg = vscode.workspace.getConfiguration('xi-cmt');
-
-    const maxLines = cfg.get<number>('maxLines', 1500);
-    const lineCount = source.split('\n').length;
-    if (lineCount > maxLines) {
-      return [
-        `// xi-cmt: 文件行数 ${lineCount} 超过 maxLines=${maxLines}。`,
-        `// 临时方案：把该文件局部代码复制到新文件后再 Open Annotated Preview。`,
-        `// 或在 settings.json 把 xi-cmt.maxLines 调大（V1.x 加分块后才推荐 > 2000）。`,
-      ].join('\n');
-    }
-
-    // 算缓存路径
-    const meta = extractUriMeta(uri);
     const model = cfg.get<string>('model', 'deepseek-chat');
-    const cacheMode = (cfg.get<string>('cacheMode', 'project') as CacheMode) ?? 'project';
-    const cacheKey = computeCacheKey(meta.hash ?? 'nohash', meta.model ?? model, meta.pv ?? PROMPT_VERSION);
-    const cachePath = resolveCachePath(cacheKey, { mode: cacheMode, originalUri });
+    const promptPreset = (cfg.get<string>('promptPreset', 'expert') || 'expert') as PromptPreset;
+    const customPrompt = cfg.get<string>('customPrompt', '') ?? '';
+    const commentLanguage = cfg.get<string>('commentLanguage', 'zh-CN');
 
-    // 检查缓存
+    // 用实际生效的 system prompt 内容算 hash，切换预设自动产生不同 cache key
+    const effectiveSystemPrompt = buildSystemPrompt({
+      languageId: doc.languageId,
+      commentLanguage,
+      promptPreset,
+      customPrompt,
+    });
+    const promptHash = computePromptHash(effectiveSystemPrompt);
+
+    const meta = extractUriMeta(uri);
+    const cacheKey = computeCacheKey(meta.hash ?? 'nohash', meta.model ?? model, meta.pv ?? PROMPT_VERSION, promptHash);
+    const cachePath = resolveCachePath(cacheKey);
+    const linemapPath = resolveLinemapPath(cachePath);
+
+    // 注册双向映射，供 extension.ts scroll sync 使用
+    this._originalToCmt.set(originalUri.toString(), uri.toString());
+    this._cmtToOriginal.set(uri.toString(), originalUri.toString());
+
+    // 检查整文件缓存（最快路径）
     const cached = await readCache(cachePath);
     if (cached !== undefined) {
       const state: StreamState = {
-        source,
-        cachePath,
-        buffer: cached,
-        done: true,
-        renderedFinal: cached,
-        lastFire: 0,
+        source, cachePath, linemapPath, originalUri, promptHash,
+        buffer: cached, done: true, renderedFinal: cached, lastFire: 0,
       };
       this.streams.set(uri.toString(), state);
+      // 加载 linemap sidecar（后台，不阻塞返回）
+      readLinemapSidecar(linemapPath).then((sidecar) => {
+        if (sidecar) this.setLinemap(uri, new Linemap(sidecar));
+      }).catch(() => undefined);
       return state;
     }
 
@@ -173,22 +222,33 @@ export class CmtContentProvider implements vscode.TextDocumentContentProvider {
       apiKey,
       timeoutMs: cfg.get<number>('requestTimeoutMs', 120000),
       languageId: doc.languageId,
-      commentLanguage: cfg.get<string>('commentLanguage', 'zh-CN'),
+      commentLanguage,
+      promptPreset,
+      customPrompt,
     };
 
+    const lines = splitSourceLines(source);
+    const chunks = splitBySemanticBoundary(lines);
+    const isChunked = chunks.length > 1;
+
     const state: StreamState = {
-      source,
-      cachePath,
-      buffer: '',
-      done: false,
-      lastFire: 0,
+      source, cachePath, linemapPath, originalUri, promptHash,
+      buffer: '', done: false, lastFire: 0,
+      totalChunks: isChunked ? chunks.length : undefined,
+      completedChunks: isChunked ? 0 : undefined,
     };
     this.streams.set(uri.toString(), state);
 
-    void this.runStream(uri, settings, state);
+    if (isChunked) {
+      void this.runChunks(uri, settings, state, lines, chunks);
+    } else {
+      void this.runStream(uri, settings, state);
+    }
+
     return state;
   }
 
+  /** 单块流式处理（原始路径，小文件 ≤ 500 行） */
   private async runStream(uri: vscode.Uri, settings: LlmSettings, state: StreamState): Promise<void> {
     try {
       await this.semaphore.run(async () => {
@@ -203,16 +263,126 @@ export class CmtContentProvider implements vscode.TextDocumentContentProvider {
           }
         }
       });
+
       const { parsed, trailingComments } = parse(state.buffer);
       validate(parsed, state.source);
-      state.renderedFinal = render(parsed, state.source, trailingComments);
+      const { content, pairs } = renderWithLinemap(parsed, state.source, trailingComments);
+      state.renderedFinal = content;
       state.done = true;
-      // 写缓存：失败不阻塞显示
+
       try {
-        await writeCacheAtomic(state.cachePath, state.renderedFinal);
+        await writeCacheAtomic(state.cachePath, content);
       } catch (err) {
         console.error('xi-cmt: writeCacheAtomic failed', err);
       }
+
+      const lines = splitSourceLines(state.source);
+      const sidecar = buildLinemapSidecar(pairs, content.split('\n').length, lines.length, true);
+      this.setLinemap(uri, new Linemap(sidecar));
+      writeLinemapSidecar(state.linemapPath, sidecar).catch((err) => {
+        console.error('xi-cmt: writeLinemapSidecar failed', err);
+      });
+
+    } catch (err) {
+      state.error = err;
+      state.done = true;
+      this._onError.fire({ uri, error: err });
+    }
+    this._onDidChange.fire(uri);
+  }
+
+  /** 多块并发处理（大文件 > 500 行） */
+  private async runChunks(
+    uri: vscode.Uri,
+    settings: LlmSettings,
+    state: StreamState,
+    lines: string[],
+    chunks: ReturnType<typeof splitBySemanticBoundary>
+  ): Promise<void> {
+    const annotatedChunks: AnnotatedChunk[] = [];
+
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const chunkContent = lines.slice(chunk.contextStart, chunk.endLine + 1).join('\n');
+
+        const chunkCacheKey = computeChunkCacheKey(
+          chunkContent, chunk.index, settings.model, PROMPT_VERSION, state.promptHash
+        );
+        const chunkCachePath = resolveCachePath(chunkCacheKey);
+
+        let chunkRendered: string;
+        let chunkPairs: [number, number][];
+
+        const cachedChunk = await readCache(chunkCachePath);
+        if (cachedChunk !== undefined) {
+          const { parsed, trailingComments } = parse(cachedChunk);
+          const result = renderWithLinemap(parsed, chunkContent, trailingComments);
+          chunkRendered = result.content;
+          chunkPairs = result.pairs;
+        } else {
+          let buffer = '';
+          await this.semaphore.run(async () => {
+            for await (const delta of streamAnnotateChunk(
+              chunkContent,
+              { index: chunk.index, total: chunks.length },
+              settings
+            )) {
+              buffer += delta;
+              if (delta.includes('\n')) {
+                const now = Date.now();
+                if (now - state.lastFire >= FIRE_THROTTLE_MS) {
+                  state.lastFire = now;
+                  this._onDidChange.fire(uri);
+                }
+              }
+            }
+          });
+
+          const { parsed, trailingComments } = parse(buffer);
+          validate(parsed, chunkContent);
+          const result = renderWithLinemap(parsed, chunkContent, trailingComments);
+          chunkRendered = result.content;
+          chunkPairs = result.pairs;
+
+          writeCacheAtomic(chunkCachePath, chunkRendered).catch((err) => {
+            console.error('xi-cmt: chunk writeCacheAtomic failed', err);
+          });
+        }
+
+        annotatedChunks.push({ content: chunkRendered, pairs: chunkPairs, chunk });
+        state.completedChunks = i + 1;
+
+        this._onStatus.fire({
+          completedChunks: i + 1,
+          totalChunks: chunks.length,
+          done: false,
+        });
+        this._onDidChange.fire(uri);
+      }
+
+      // 全部块完成：拼装 + 写缓存 + 写 linemap
+      const { content: assembled, globalPairs } = assembleChunks(annotatedChunks);
+      state.renderedFinal = assembled;
+      state.done = true;
+
+      writeCacheAtomic(state.cachePath, assembled).catch((err) => {
+        console.error('xi-cmt: whole-file writeCacheAtomic failed', err);
+      });
+
+      const sidecar = buildLinemapSidecar(
+        globalPairs,
+        assembled.split('\n').length,
+        lines.length,
+        true
+      );
+      this.setLinemap(uri, new Linemap(sidecar));
+      writeLinemapSidecar(state.linemapPath, sidecar).catch((err) => {
+        console.error('xi-cmt: writeLinemapSidecar failed', err);
+      });
+
+      this._onStatus.fire({ completedChunks: chunks.length, totalChunks: chunks.length, done: true });
+
     } catch (err) {
       state.error = err;
       state.done = true;
@@ -224,10 +394,19 @@ export class CmtContentProvider implements vscode.TextDocumentContentProvider {
 
 function renderInProgress(buffer: string, source: string): string {
   const { parsed, trailingComments } = parse(buffer);
-  const renderedSoFar = render(parsed, source, trailingComments);
+  const renderedSoFar = renderWithLinemap(parsed, source, trailingComments).content;
   const annotatedCount = parsed.filter((p) => p.leadingComments.length > 0).length;
   const footer = `\n\n// ⏳ xi-cmt: 流式生成中... 已收到 ${annotatedCount} 条注释段，${parsed.length} 个锚点`;
   return renderedSoFar + footer;
+}
+
+function renderChunking(completedChunks: number, totalChunks: number): string {
+  return [
+    '// ════════════════════════════════════════════════════════════════',
+    `// 📖 xi-cmt: 大文件分块生成中... [${completedChunks}/${totalChunks} 块已完成]`,
+    `// 完成后自动显示完整注释视图。`,
+    '// ════════════════════════════════════════════════════════════════',
+  ].join('\n');
 }
 
 function renderError(err: unknown, source: string): string {
@@ -260,17 +439,30 @@ function renderError(err: unknown, source: string): string {
   return header.join('\n') + '\n\n' + source;
 }
 
+/**
+ * 从 CMT URI 反推原始文件 URI。
+ * Arch-3 修复：原代码在 for 循环内直接 return，永远只取第一个 workspace folder。
+ * 修复后：绝对路径直接还原；相对路径尝试各 workspace folder，找到不越界的候选路径。
+ */
 function recoverOriginalUri(cmtUri: vscode.Uri): vscode.Uri | undefined {
   const cmtPath = cmtUri.path.startsWith('/') ? cmtUri.path.slice(1) : cmtUri.path;
   const original = stripCmtSuffix(cmtPath);
 
+  if (path.isAbsolute(original)) {
+    return vscode.Uri.file(original);
+  }
+
   const folders = vscode.workspace.workspaceFolders;
   if (folders && folders.length > 0) {
     for (const f of folders) {
-      return vscode.Uri.joinPath(f.uri, original);
+      const candidate = vscode.Uri.joinPath(f.uri, original);
+      const rel = path.relative(f.uri.fsPath, candidate.fsPath);
+      if (!rel.startsWith('..')) return candidate;
     }
+    return vscode.Uri.joinPath(folders[0].uri, original);
   }
-  return vscode.Uri.file(original.startsWith('/') ? original : '/' + original);
+
+  return vscode.Uri.file('/' + original);
 }
 
 function stripCmtSuffix(p: string): string {

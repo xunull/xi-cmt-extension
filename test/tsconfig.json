@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "outDir": "../out-test",
+    "rootDir": "..",
+    "sourceMap": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": [
+    "./chunker.test.ts",
+    "./assembleChunks.test.ts",
+    "./linemap.test.ts",
+    "../src/chunker.ts",
+    "../src/assemble.ts",
+    "../src/linemap.ts"
+  ],
+  "exclude": ["../node_modules"]
+}

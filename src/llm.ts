@@ -14,7 +14,9 @@
  *   - 非流式仍然 retry 一次（429/5xx + 1s backoff）
  */
 
-import { buildSystemPrompt, buildUserPrompt, PromptOptions } from './prompt';
+import { buildSystemPrompt, buildUserPrompt, buildChunkUserPrompt, PromptOptions, PromptPreset } from './prompt';
+
+export type { PromptPreset };
 
 export interface LlmSettings extends PromptOptions {
   baseURL: string;
@@ -193,13 +195,6 @@ export async function annotate(source: string, settings: LlmSettings): Promise<s
 
 /**
  * 流式注释。逐块 yield LLM 返回的 delta.content 文本片段。
- *
- * SSE 解析逻辑：
- *   - 按 \n 切行
- *   - 只处理 `data: ` 开头的行
- *   - payload === '[DONE]' 视为流结束
- *   - 否则 JSON.parse 取 choices[0]?.delta?.content
- *
  * caller 可通过 AbortSignal 提前终止（VS Code 用户关闭文档时）。
  */
 export async function* streamAnnotate(
@@ -209,7 +204,47 @@ export async function* streamAnnotate(
 ): AsyncGenerator<string, void, unknown> {
   preflight(settings);
   const plan = buildRequest(source, settings, true);
+  yield* streamFromPlan(plan, signal);
+}
 
+/**
+ * 分块流式注释。与 streamAnnotate 相同的 SSE 协议，但使用块内相对行号（L1:、L2:…）。
+ * chunkContent：lines[contextStart..endLine] 拼接（含 overlap 上下文）。
+ */
+export async function* streamAnnotateChunk(
+  chunkContent: string,
+  chunkInfo: { index: number; total: number },
+  settings: LlmSettings,
+  signal?: AbortSignal
+): AsyncGenerator<string, void, unknown> {
+  preflight(settings);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'text/event-stream' };
+  if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
+  const plan: RequestPlan = {
+    url: buildEndpoint(settings.baseURL),
+    headers,
+    body: JSON.stringify({
+      model: settings.model,
+      messages: [
+        { role: 'system', content: buildSystemPrompt(settings) },
+        { role: 'user', content: buildChunkUserPrompt(chunkContent, chunkInfo, settings) },
+      ],
+      stream: true,
+      temperature: 0.2,
+    }),
+    timeoutMs: settings.timeoutMs,
+  };
+  yield* streamFromPlan(plan, signal);
+}
+
+/**
+ * 共享 SSE 流读取逻辑，供 streamAnnotate 和 streamAnnotateChunk 复用。
+ * SSE 解析：按行处理 `data: ` 事件，payload === '[DONE]' 视为流结束。
+ */
+async function* streamFromPlan(
+  plan: RequestPlan,
+  signal?: AbortSignal
+): AsyncGenerator<string, void, unknown> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), plan.timeoutMs);
   const onAbort = (): void => ctrl.abort();
@@ -229,13 +264,8 @@ export async function* streamAnnotate(
   } catch (err) {
     clearTimeout(timer);
     if (signal) signal.removeEventListener('abort', onAbort);
-    if (isAbortError(err)) {
-      throw new LlmError('timeout', `LLM 请求超时（${plan.timeoutMs}ms）`);
-    }
-    throw new LlmError(
-      'network',
-      `网络错误：${err instanceof Error ? err.message : String(err)}`
-    );
+    if (isAbortError(err)) throw new LlmError('timeout', `LLM 请求超时（${plan.timeoutMs}ms）`);
+    throw new LlmError('network', `网络错误：${err instanceof Error ? err.message : String(err)}`);
   }
 
   if (!res.ok) {
@@ -253,22 +283,20 @@ export async function* streamAnnotate(
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = '';
+  let buf = '';
   let yieldedAny = false;
 
   try {
-    // SSE 事件循环
-    // 兼容 \r\n 与 \n 两种换行
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      buf += decoder.decode(value, { stream: true });
 
       let nl: number;
-      while ((nl = buffer.search(/\r?\n/)) !== -1) {
-        const line = buffer.slice(0, nl);
-        const eolLen = buffer[nl] === '\r' ? 2 : 1;
-        buffer = buffer.slice(nl + eolLen);
+      while ((nl = buf.search(/\r?\n/)) !== -1) {
+        const line = buf.slice(0, nl);
+        const eolLen = buf[nl] === '\r' ? 2 : 1;
+        buf = buf.slice(nl + eolLen);
 
         const trimmed = line.trim();
         if (!trimmed || !trimmed.startsWith('data:')) continue;
@@ -282,12 +310,12 @@ export async function* streamAnnotate(
             yield delta;
           }
         } catch {
-          // 忽略畸形 chunk，继续
+          // 忽略畸形 chunk
         }
       }
     }
     // flush 最后一行（少数 endpoint 不带 trailing newline）
-    const trailing = buffer.trim();
+    const trailing = buf.trim();
     if (trailing.startsWith('data:')) {
       const payload = trailing.slice(5).trim();
       if (payload !== '[DONE]') {
@@ -307,22 +335,13 @@ export async function* streamAnnotate(
       throw new LlmError('response_shape', '流式响应没有产生任何 content');
     }
   } catch (err) {
-    if (isAbortError(err)) {
-      throw new LlmError('timeout', `流式 LLM 在 ${plan.timeoutMs}ms 内未完成或被取消`);
-    }
+    if (isAbortError(err)) throw new LlmError('timeout', `流式 LLM 在 ${plan.timeoutMs}ms 内未完成或被取消`);
     if (err instanceof LlmError) throw err;
-    throw new LlmError(
-      'network',
-      `流式读取失败：${err instanceof Error ? err.message : String(err)}`
-    );
+    throw new LlmError('network', `流式读取失败：${err instanceof Error ? err.message : String(err)}`);
   } finally {
     clearTimeout(timer);
     if (signal) signal.removeEventListener('abort', onAbort);
-    try {
-      reader.releaseLock();
-    } catch {
-      // ignore
-    }
+    try { reader.releaseLock(); } catch { /* ignore */ }
   }
 }
 

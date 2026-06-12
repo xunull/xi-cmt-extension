@@ -1,8 +1,8 @@
 # xi-cmt
 out/
 out-scripts/
+out-test/
 *.vsix
-.vscode/.cmt-cache/
 fixtures/*.llm-output.*.txt
 fixtures/*.rendered.*.txt
 fixtures/*.stream-rendered.*.txt
@@ -150,3 +150,7 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+
+local-docs/
+
