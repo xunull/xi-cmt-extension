@@ -97,25 +97,19 @@
       "title": "xi-cmt",
       "properties": {
         "xi-cmt.baseURL": {
+          "order": 1,
           "type": "string",
           "default": "https://api.deepseek.com/v1",
-          "description": "OpenAI 兼容 /v1/chat/completions 的根路径。示例: https://api.deepseek.com/v1 | https://api.moonshot.cn/v1 | http://localhost:11434/v1"
+          "description": "任何 OpenAI 兼容的 /v1/chat/completions 根路径。各厂商示例：\n• DeepSeek：https://api.deepseek.com/v1\n• OpenAI：https://api.openai.com/v1\n• Moonshot（Kimi）：https://api.moonshot.cn/v1\n• SiliconFlow：https://api.siliconflow.cn/v1\n• 阿里云百炼：https://dashscope.aliyuncs.com/compatible-mode/v1\n• Ollama（本地）：http://localhost:11434/v1"
         },
         "xi-cmt.model": {
+          "order": 2,
           "type": "string",
           "default": "deepseek-chat",
-          "description": "模型名。示例: deepseek-chat | moonshot-v1-32k | qwen2.5-coder:7b"
-        },
-        "xi-cmt.commentLanguage": {
-          "type": "string",
-          "default": "zh-CN",
-          "enum": [
-            "zh-CN",
-            "en-US"
-          ],
-          "description": "注释语言。MVP 仅测试 zh-CN。"
+          "description": "模型名，与所选厂商匹配。各厂商示例：\n• DeepSeek：deepseek-chat / deepseek-reasoner\n• OpenAI：gpt-4o / gpt-4o-mini\n• Moonshot：moonshot-v1-32k / moonshot-v1-128k\n• SiliconFlow：Qwen/Qwen2.5-72B-Instruct\n• 阿里云百炼：qwen-plus / qwen-max\n• Ollama：qwen2.5-coder:7b / deepseek-coder-v2:16b"
         },
         "xi-cmt.promptPreset": {
+          "order": 3,
           "type": "string",
           "default": "expert",
           "enum": ["beginner", "expert", "architect", "custom"],
@@ -128,17 +122,30 @@
           "description": "注释风格预设。切换预设后，已打开的注释视图需手动运行「xi-cmt: Regenerate」刷新。"
         },
         "xi-cmt.customPrompt": {
+          "order": 4,
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
           "description": "promptPreset=custom 时生效的自定义 system prompt。L<n>: 锚点格式由插件自动保证，无需在此声明。留空时退回 expert 预设。"
         },
+        "xi-cmt.commentLanguage": {
+          "order": 5,
+          "type": "string",
+          "default": "zh-CN",
+          "enum": [
+            "zh-CN",
+            "en-US"
+          ],
+          "description": "注释语言。MVP 仅测试 zh-CN。"
+        },
         "xi-cmt.maxLines": {
+          "order": 6,
           "type": "number",
           "default": 1500,
           "description": "单文件最大行数。超出此值不调 LLM。"
         },
         "xi-cmt.requestTimeoutMs": {
+          "order": 7,
           "type": "number",
           "default": 120000,
           "description": "LLM 请求超时（毫秒）。Ollama 大模型 / DeepSeek thinking 建议抬到 180000。"

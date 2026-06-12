@@ -18,6 +18,12 @@ Post-ship and deferred items tracked here. Items are added by CEO/Eng reviews an
 
 ---
 
+## UX 改进
+
+- [ ] **[PROVIDER-UX]** 加 `xi-cmt: Configure Provider` 命令：弹 QuickPick 列表选厂商（DeepSeek / OpenAI / Moonshot / SiliconFlow / 阿里云百炼 / Ollama），选后自动联动写入 `baseURL` + `model` 默认值，再提示输入 API Key。纯下拉框不可行（设置项无联动逻辑，选完 baseURL 后 model 仍是旧值会导致报错）。约 50 行代码。
+
+---
+
 ## 按需扩展
 
 - [ ] **[CHUNKER]** 根据用户反馈扩展 `chunker.ts` 语言语义切分支持。当前：TS/JS/Go/Python/Rust。待扩展候选：C/C++、Java、PHP、Ruby、Swift、Kotlin（降级到均等切分不会出错，但切分质量更低）
